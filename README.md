@@ -16,6 +16,8 @@ flowchart TD
         subgraph snet_appgw["snet-appgw  {spoke_appgw_subnet}"]
             PIP_AppGW["Public IP\npip-agw-{workload}-{env}-{location}-{seq}"]
             AppGW["Application Gateway WAF_v2\nagw-{workload}-{env}-{location}-{seq}\nOWASP 3.2 / Prevention mode"]
+            PVTFRONTEND["AppGW Private Frontend IP\nappgw-private-frontend"]
+            PL_NIC["Private Link NIC\npvtlink-{workload}-{env}-{seq}"]
         end
         subgraph snet_workload["snet-workload  {spoke_workload_subnet}"]
             VM["Workload VMs / Apps\nUDR: 0.0.0.0/0 to Firewall"]
