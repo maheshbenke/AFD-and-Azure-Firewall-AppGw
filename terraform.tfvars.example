@@ -1,0 +1,171 @@
+# Example terraform.tfvars file
+# Copy this file to terraform.tfvars and customize the values
+
+# Required — Azure region (lowercase, e.g. "eastus", "uksouth")
+location = "eastus"
+
+# Naming segments
+resource_name_workload    = "fw"
+resource_name_environment = "dev"
+# resource_name_sequence_start   = 1
+# resource_name_location_short   = ""   # auto-detected from region
+
+# Override name templates (optional)
+# resource_name_templates = {
+#   resource_group_name          = "rg-$${workload}-$${environment}-$${location}-$${sequence}"
+#   log_analytics_workspace_name = "law-$${workload}-$${environment}-$${location}-$${sequence}"
+#   virtual_network_name         = "vnet-$${workload}-$${environment}-$${location}-$${sequence}"
+#   public_ip_name               = "pip-fw-$${workload}-$${environment}-$${location}-$${sequence}"
+#   firewall_name                = "fw-$${workload}-$${environment}-$${location}-$${sequence}"
+#   firewall_policy_name         = "fwpol-$${workload}-$${environment}-$${location}-$${sequence}"
+#   spoke_virtual_network_name   = "vnet-spoke-$${workload}-$${environment}-$${location}-$${sequence}"
+#   spoke_route_table_name       = "rt-spoke-$${workload}-$${environment}-$${location}-$${sequence}"
+#   appgw_name                   = "agw-$${workload}-$${environment}-$${location}-$${sequence}"
+#   appgw_public_ip_name         = "pip-agw-$${workload}-$${environment}-$${location}-$${sequence}"
+#   front_door_name              = "afd-$${workload}-$${environment}-$${sequence}"
+# }
+
+tags = {
+  Environment = "Production"
+  ManagedBy   = "Terraform"
+  Purpose     = "AzureFirewall"
+  CostCenter  = "IT-Security"
+  Owner       = "NetworkTeam"
+}
+
+# ---------------------------------------------------------------------------
+# Hub Networking
+# ---------------------------------------------------------------------------
+address_space                  = "10.0.0.0/16"
+firewall_subnet_address_prefix = "10.0.1.0/26"
+
+# Azure Firewall
+firewall_sku_name = "AZFW_VNet"
+firewall_sku_tier = "Standard" # Options: Basic, Standard, Premium
+
+# Availability Zones (set to [] for no zones)
+availability_zones = ["1", "2", "3"]
+
+# Optional: SNAT configuration
+# firewall_private_ip_ranges = ["IANAPrivateRanges"]
+
+# ---------------------------------------------------------------------------
+# Spoke Networking
+# ---------------------------------------------------------------------------
+spoke_address_space                  = "10.1.0.0/16"
+spoke_workload_subnet_address_prefix = "10.1.1.0/24"
+spoke_appgw_subnet_address_prefix    = "10.1.2.0/24" # Must be /26 or larger
+
+# ---------------------------------------------------------------------------
+# Application Gateway (WAF_v2 in spoke snet-appgw)
+# ---------------------------------------------------------------------------
+appgw_capacity = 2 # Fixed scale units (1-125); use autoscaling in production
+
+# ---------------------------------------------------------------------------
+# Azure Front Door Premium — origin connectivity patterns
+# ---------------------------------------------------------------------------
+# Pattern 1 (default): Front Door → AppGW public IP
+# Pattern 2 (secure):  Front Door Premium → AppGW via Private Link (no public ingress)
+#
+# To enable Pattern 2:
+#   1. Set enable_appgw_private_link = true
+#   2. Run: terraform apply -var="enable_appgw_private_link=true"
+#   3. Terraform automatically approves the pending Private Endpoint connection
+#      via Azure CLI (requires az login with Contributor/Network Contributor role).
+#
+# Implementation note — Pattern 2 uses azapi_resource for the AFD origin instead of
+# azurerm_cdn_frontdoor_origin. This is required because the azurerm provider sends
+# groupId = "Gateway" to the AFD REST API, but Application Gateway's private link
+# resource exposes groupId = "appgw-private-frontend" (the frontend IP config name).
+# The Azure API rejects "Gateway" with ApplicationGatewayPrivateLinkOperationError.
+# Use `az network private-link-resource list --name <appgw> -g <rg>
+#   --type Microsoft.Network/applicationGateways` to verify the groupId for your AppGW.
+#
+enable_appgw_private_link = false
+
+# Private Link subnet — dedicated /29 for the AppGW Private Link NIC.
+# Only used when enable_appgw_private_link = true. Must not overlap existing subnets.
+# appgw_private_link_subnet_prefix = "10.1.3.0/29"
+
+# Static private IP for the AppGW private frontend IP configuration (appgw-private-frontend).
+# Must fall within spoke_appgw_subnet_address_prefix (10.1.2.0/24).
+# appgw_private_frontend_ip = "10.1.2.200"
+
+# ---------------------------------------------------------------------------
+# Firewall Rules
+# ---------------------------------------------------------------------------
+
+# Network rules (L4)
+network_rule_collections = {
+  allow-dns = {
+    priority = 1000
+    action   = "Allow"
+    rules = [
+      {
+        name                  = "allow-dns"
+        protocols             = ["UDP"]
+        source_addresses      = ["10.0.0.0/16"]
+        destination_addresses = ["*"]
+        destination_ports     = ["53"]
+      }
+    ]
+  }
+  allow-ntp = {
+    priority = 1100
+    action   = "Allow"
+    rules = [
+      {
+        name                  = "allow-ntp"
+        protocols             = ["UDP"]
+        source_addresses      = ["10.0.0.0/16"]
+        destination_addresses = ["*"]
+        destination_ports     = ["123"]
+      }
+    ]
+  }
+}
+
+# Application rules (L7)
+application_rule_collections = {
+  allow-web = {
+    priority = 1000
+    action   = "Allow"
+    rules = [
+      {
+        name              = "allow-microsoft"
+        source_addresses  = ["10.0.0.0/16"]
+        destination_fqdns = ["*.microsoft.com", "*.azure.com", "*.windows.net"]
+        protocols = [
+          { type = "Https", port = 443 }
+        ]
+      },
+      {
+        name              = "allow-updates"
+        source_addresses  = ["10.0.0.0/16"]
+        destination_fqdns = ["*.ubuntu.com", "*.windowsupdate.com"]
+        protocols = [
+          { type = "Https", port = 443 },
+          { type = "Http", port = 80 }
+        ]
+      }
+    ]
+  }
+}
+
+# DNAT rules (inbound NAT) — uncomment and customize as needed
+# dnat_rule_collections = {
+#   inbound-rdp = {
+#     priority = 1000
+#     rules = [
+#       {
+#         name                = "rdp-to-jumpbox"
+#         protocols           = ["TCP"]
+#         source_addresses    = ["<your-public-ip>/32"]
+#         destination_address = "<firewall-public-ip>"
+#         destination_ports   = ["3389"]
+#         translated_address  = "10.0.2.4"
+#         translated_port     = "3389"
+#       }
+#     ]
+#   }
+# }
